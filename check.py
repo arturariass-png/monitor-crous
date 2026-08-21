@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Vigila la pagina de presa de claus del CROUS i avisa per Telegram
-si apareix un horari anterior a la cita que ja tens reservada.
+Vigila la pagina de presa de claus del CROUS amb un navegador real
+(Playwright) i avisa per Telegram si apareix un horari anterior a la
+cita que ja tens reservada.
 """
 
 import json
@@ -12,10 +13,9 @@ import sys
 from datetime import datetime
 
 import requests
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 URL = os.environ.get("URL", "").strip()
-COOKIE = os.environ.get("COOKIE", "").strip()
 LIMIT = os.environ.get("LIMIT", "2026-09-02 12:15").strip()
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
@@ -29,14 +29,10 @@ MESOS = {
     "dec": 12, "déc": 12,
 }
 
-CAPCALERES = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "fr-FR,fr;q=0.9,ca;q=0.8,es;q=0.7",
-}
+AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+)
 
 PATRO = re.compile(
     r"[Pp]rochain\s+rendez-?vous\s+le\s+(\d{1,2})\s+([A-Za-zÀ-ÿ]+)\.?\s+"
@@ -59,44 +55,30 @@ def avisa(missatge: str) -> None:
         print(f"[error] Telegram: {resposta.status_code} {resposta.text}")
 
 
-def neteja(html: str) -> str:
-    sopa = BeautifulSoup(html, "html.parser")
-    for etiqueta in sopa(["script", "style", "noscript"]):
-        etiqueta.decompose()
-    return re.sub(r"\s+", " ", sopa.get_text(" ", strip=True))
-
-
 def descarrega() -> str:
-    capcaleres = dict(CAPCALERES)
-    if COOKIE:
-        capcaleres["Cookie"] = COOKIE
-
-    with requests.Session() as sessio:
-        sessio.headers.update(capcaleres)
-
-        # Primera visita: serveix per recollir les galetes que la web
-        # reparteix (consentiment, sessio anonima...), com fa un navegador.
-        primera = sessio.get(URL, timeout=45, allow_redirects=True)
-        primera.raise_for_status()
-        text = neteja(primera.text)
-        print(f"[intent 1] {primera.status_code}, {len(primera.text)} bytes")
-
-        if PATRO.search(text):
-            return text
-
-        # Segona visita, ja amb les galetes posades i amb Referer.
-        sessio.cookies.set("hasConsent", "true", domain=".lescrous.fr")
-        segona = sessio.get(
-            URL, timeout=45, headers={"Referer": URL}, allow_redirects=True
+    """Obre la pagina amb un navegador real i espera que el JS la dibuixi."""
+    with sync_playwright() as p:
+        navegador = p.chromium.launch()
+        context = navegador.new_context(
+            locale="fr-FR",
+            user_agent=AGENT,
+            viewport={"width": 1400, "height": 1200},
         )
-        segona.raise_for_status()
-        segon_text = neteja(segona.text)
-        print(f"[intent 2] {segona.status_code}, {len(segona.text)} bytes")
+        pagina = context.new_page()
 
-        galetes = "; ".join(f"{c.name}" for c in sessio.cookies)
-        print(f"[galetes rebudes] {galetes or 'cap'}")
+        pagina.goto(URL, wait_until="networkidle", timeout=90_000)
 
-        return segon_text if len(segon_text) > len(text) else text
+        # Espera fins a 30 s que aparegui la frase que ens interessa.
+        text = ""
+        for _ in range(15):
+            text = re.sub(r"\s+", " ", pagina.inner_text("body")).strip()
+            if PATRO.search(text) or "creneau" in text.lower() or "créneau" in text.lower():
+                break
+            pagina.wait_for_timeout(2_000)
+
+        print(f"[navegador] {len(text)} caracters de text visible")
+        navegador.close()
+        return text
 
 
 def interpreta_data(dia: str, mes: str, hora: str, minut: str) -> datetime:
@@ -138,11 +120,11 @@ def main() -> int:
                 )
             estat["pagina_ok"] = False
             ESTAT.write_text(json.dumps(estat, ensure_ascii=False, indent=2))
-            print(f"[diagnostic] Text rebut: {text[:800]}")
+            print(f"[diagnostic] Text rebut: {text[:1500]}")
             return 1
 
         print("Pagina correcta, pero no anuncia cap proper horari lliure.")
-        print(f"[diagnostic] {text[:800]}")
+        print(f"[diagnostic] {text[:1500]}")
         estat["pagina_ok"] = True
         ESTAT.write_text(json.dumps(estat, ensure_ascii=False, indent=2))
         return 0
