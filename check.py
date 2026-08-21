@@ -2,9 +2,6 @@
 """
 Vigila la pagina de presa de claus del CROUS i avisa per Telegram
 si apareix un horari anterior a la cita que ja tens reservada.
-
-Es basa en la linia "Prochain rendez-vous le XX mois a HH:MM" que la
-propia web mostra a dalt a la dreta.
 """
 
 import json
@@ -62,16 +59,44 @@ def avisa(missatge: str) -> None:
         print(f"[error] Telegram: {resposta.status_code} {resposta.text}")
 
 
+def neteja(html: str) -> str:
+    sopa = BeautifulSoup(html, "html.parser")
+    for etiqueta in sopa(["script", "style", "noscript"]):
+        etiqueta.decompose()
+    return re.sub(r"\s+", " ", sopa.get_text(" ", strip=True))
+
+
 def descarrega() -> str:
     capcaleres = dict(CAPCALERES)
     if COOKIE:
         capcaleres["Cookie"] = COOKIE
-    resposta = requests.get(URL, headers=capcaleres, timeout=45)
-    resposta.raise_for_status()
-    sopa = BeautifulSoup(resposta.text, "html.parser")
-    for etiqueta in sopa(["script", "style", "noscript"]):
-        etiqueta.decompose()
-    return re.sub(r"\s+", " ", sopa.get_text(" ", strip=True))
+
+    with requests.Session() as sessio:
+        sessio.headers.update(capcaleres)
+
+        # Primera visita: serveix per recollir les galetes que la web
+        # reparteix (consentiment, sessio anonima...), com fa un navegador.
+        primera = sessio.get(URL, timeout=45, allow_redirects=True)
+        primera.raise_for_status()
+        text = neteja(primera.text)
+        print(f"[intent 1] {primera.status_code}, {len(primera.text)} bytes")
+
+        if PATRO.search(text):
+            return text
+
+        # Segona visita, ja amb les galetes posades i amb Referer.
+        sessio.cookies.set("hasConsent", "true", domain=".lescrous.fr")
+        segona = sessio.get(
+            URL, timeout=45, headers={"Referer": URL}, allow_redirects=True
+        )
+        segona.raise_for_status()
+        segon_text = neteja(segona.text)
+        print(f"[intent 2] {segona.status_code}, {len(segona.text)} bytes")
+
+        galetes = "; ".join(f"{c.name}" for c in sessio.cookies)
+        print(f"[galetes rebudes] {galetes or 'cap'}")
+
+        return segon_text if len(segon_text) > len(text) else text
 
 
 def interpreta_data(dia: str, mes: str, hora: str, minut: str) -> datetime:
@@ -96,7 +121,6 @@ def main() -> int:
 
     coincidencia = PATRO.search(text)
 
-    # --- Comprovacio que hem rebut la pagina bona ------------------------
     if not coincidencia:
         minuscules = text.lower()
         pagina_valida = any(
