@@ -2,8 +2,6 @@ name: Monitor CROUS
 
 on:
   schedule:
-    # Dues execucions garantides cada hora. La pausa aleatoria de sota
-    # fa que l'hora real de consulta no sigui mai la mateixa.
     - cron: "8 * * * *"
     - cron: "38 * * * *"
   workflow_dispatch:
@@ -25,7 +23,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install requests beautifulsoup4
+      - name: Instal-la dependencies
+        run: |
+          pip install requests playwright
+          playwright install --with-deps chromium
 
       - name: Espera aleatoria (0-15 min)
         if: github.event_name == 'schedule'
@@ -35,10 +36,6 @@ jobs:
         env:
           URL: "https://mesrdv.lescrous.fr/fr/subjects/53f64a5e-5a91-11e8-9cb8-005056b0d91b"
           LIMIT: "2026-09-02 12:15"
-          # Opcional: nomes cal si algun dia la web deixa de mostrar
-          # el calendari sense identificar-se. Si no crees el secret,
-          # aquesta linia queda buida i no passa res.
-          COOKIE: ${{ secrets.COOKIE }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python check.py
